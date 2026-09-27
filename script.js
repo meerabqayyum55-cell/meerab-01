@@ -20,19 +20,34 @@ function row(label, value) {
   return `<div class="popup-row"><span>${label}</span><strong>${value}</strong></div>`;
 }
 
-async function loadGeoJson(path) {
-  const response = await fetch(path);
-  if (!response.ok) throw new Error(`Could not load ${path} (${response.status})`);
-  return response.json();
+async function loadGeoJson(paths) {
+  const errors = [];
+  for (const path of paths) {
+    try {
+      const url = new URL(path, document.baseURI);
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (data.type !== 'FeatureCollection' || !Array.isArray(data.features)) {
+        throw new Error('The file is not a GeoJSON FeatureCollection');
+      }
+      return data;
+    } catch (error) {
+      errors.push(`${path}: ${error.message}`);
+    }
+  }
+  throw new Error(errors.join(' | '));
 }
 
 async function initLayers() {
-  try {
-    const [citiesData, stationsData] = await Promise.all([
-      loadGeoJson('data/cities.geojson'),
-      loadGeoJson('data/weather_stations.geojson')
-    ]);
+  const overlayMaps = {};
+  const errors = [];
 
+  // Try the expected data/ paths first, then common GitHub upload layouts.
+  try {
+    const citiesData = await loadGeoJson([
+      'data/cities.geojson', 'Data/cities.geojson', 'cities.geojson'
+    ]);
     const citiesLayer = L.geoJSON(citiesData, {
       pointToLayer: (_feature, latlng) => L.marker(latlng, { icon: cityIcon }),
       onEachFeature: (feature, layer) => {
@@ -40,28 +55,43 @@ async function initLayers() {
         layer.bindPopup(`<p class="popup-kicker">City · ${p.province}</p><h3 class="popup-name">${p.name}</h3>${row('Province', p.province)}${row('Type', p.type)}`);
         layer.bindTooltip(p.name, { direction: 'right', offset: [9, 0], className: 'city-label' });
       }
-    });
+    }).addTo(map);
+    overlayMaps['Major Cities'] = citiesLayer;
+  } catch (error) {
+    console.error('Cities GeoJSON failed to load:', error);
+    errors.push(`Cities data could not load. Check that data/cities.geojson is committed to GitHub. (${error.message})`);
+  }
 
+  try {
+    const stationsData = await loadGeoJson([
+      'data/weather_stations.geojson',
+      'data/Weather_Stations.geojson',
+      'Data/weather_stations.geojson',
+      'weather_stations.geojson'
+    ]);
     const stationsLayer = L.geoJSON(stationsData, {
       pointToLayer: (_feature, latlng) => L.marker(latlng, { icon: stationIcon }),
       onEachFeature: (feature, layer) => {
         const p = feature.properties;
         layer.bindPopup(`<p class="popup-kicker">Illustrative station reading</p><h3 class="popup-name">${p.station}</h3>${row('Temperature', `${p.temperature} °C`)}${row('Rainfall', `${p.rainfall} mm`)}${row('Reading type', 'Sample data')}`);
       }
-    });
-
-    citiesLayer.addTo(map);
-    stationsLayer.addTo(map);
-    L.control.layers(
-      { 'OpenStreetMap': osm, 'Satellite imagery': satellite },
-      { 'Cities (15)': citiesLayer, 'Weather stations (15)': stationsLayer },
-      { position: 'topright', collapsed: false }
-    ).addTo(map);
+    }).addTo(map);
+    overlayMaps['Weather Stations'] = stationsLayer;
   } catch (error) {
-    console.error(error);
+    console.error('Weather stations GeoJSON failed to load:', error);
+    errors.push(`Weather stations could not load. Check that data/weather_stations.geojson is committed to GitHub with the same spelling and capitalization. (${error.message})`);
+  }
+
+  L.control.layers(
+    { 'OpenStreetMap': osm, 'Satellite imagery': satellite },
+    overlayMaps,
+    { position: 'topright', collapsed: false }
+  ).addTo(map);
+
+  if (errors.length) {
     const notice = document.createElement('div');
     notice.className = 'data-error';
-    notice.textContent = 'Map data could not be loaded. Open this folder with a local web server (for example, VS Code Live Server).';
+    notice.textContent = errors.join(' ');
     document.querySelector('.map-frame').append(notice);
   }
 }
